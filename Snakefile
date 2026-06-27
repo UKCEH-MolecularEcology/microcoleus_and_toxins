@@ -1,4 +1,4 @@
-import os, glob
+import os, glob, re
 from pathlib import Path
 
 configfile: "config/config.yaml"
@@ -71,6 +71,17 @@ ANA_REFS    = os.path.join(ANA_DIR, "refs", "ana_refs.faa")
 ANA_DB_PFX  = os.path.join(ANA_DIR, "refs", "ana_refs")   # DIAMOND makedb prefix
 ANA_DB_DMND = ANA_DB_PFX + ".dmnd"
 
+# ── Reference dataset sources ─────────────────────────────────────────────────
+# Alignment datasets from Stanojković et al. (2024) Nat Commun
+# "The global speciation continuum of the cyanobacterium Microcoleus"
+# DOI: 10.6084/m9.figshare.24710961.v2
+FIGSHARE_DATASETS = {
+    "Dataset1.AA.alignment.fa":              "https://ndownloader.figshare.com/files/43416798",
+    "Dataset2.AA.microcoleus.and.GenBank.fa": "https://ndownloader.figshare.com/files/43416804",
+    "Dataset3.AA.microcoleus.without.genbank.fa": "https://ndownloader.figshare.com/files/43416807",
+    "Dataset3.all.single.copy.trees.nwk":    "https://ndownloader.figshare.com/files/43416801",
+}
+
 # ════════════════════════════════════════════════════════════════════════════════
 # Default target: Microcoleus genome abundance across all samples
 # ════════════════════════════════════════════════════════════════════════════════
@@ -94,6 +105,30 @@ rule ana_all:
     # pipeline to have completed first (it uses contig2genome + coverage outputs).
     input:
         os.path.join(ANA_DIR, "ana_summary.tsv")
+
+# ════════════════════════════════════════════════════════════════════════════════
+# REFERENCE DATASET DOWNLOAD
+# ════════════════════════════════════════════════════════════════════════════════
+
+rule datasets_all:
+    # Convenience target: download all four reference alignment files.
+    # Run with:  snakemake datasets_all --cores 4
+    input:
+        list(FIGSHARE_DATASETS.keys())
+
+rule download_dataset:
+    # Download a single reference alignment file from figshare.
+    # Uses wget -c so partial downloads resume rather than restart.
+    # Source: Stanojković et al. (2024) Nat Commun, DOI 10.6084/m9.figshare.24710961.v2
+    output:
+        "{dataset_file}"
+    wildcard_constraints:
+        # Only match the four known figshare filenames; avoid hijacking other rules.
+        dataset_file="|".join(re.escape(f) for f in FIGSHARE_DATASETS)
+    params:
+        url=lambda wc: FIGSHARE_DATASETS[wc.dataset_file]
+    shell:
+        "wget -c -O {output} '{params.url}'"
 
 # ════════════════════════════════════════════════════════════════════════════════
 # MICROCOLEUS ABUNDANCE RULES
