@@ -48,6 +48,7 @@ MATRIXDIR = os.path.join(OUTDIR, "matrices")
 GENOME_LIST = os.path.join(TMPDIR, "genome_ids.txt")
 DB_PREFIX   = os.path.join(DBDIR, "Dataset2_AA")
 DB_DMND     = DB_PREFIX + ".dmnd"
+LOGDIR      = os.path.join(OUTDIR, "logs")
 
 def assembly_fasta_path(sample):
     for ext in FASTA_EXTS:
@@ -126,10 +127,15 @@ rule download_dataset:
     wildcard_constraints:
         # Only match the four known figshare filenames; avoid hijacking other rules.
         dataset_file="|".join(re.escape(f) for f in FIGSHARE_DATASETS)
+    log:
+        os.path.join(LOGDIR, "download", "{dataset_file}.log")
     params:
         url=lambda wc: FIGSHARE_DATASETS[wc.dataset_file]
     shell:
-        "wget -c -O {output} '{params.url}'"
+        r"""
+        mkdir -p "$(dirname "{log}")"
+        wget -c -O {output} '{params.url}' > "{log}" 2>&1
+        """
 
 # ════════════════════════════════════════════════════════════════════════════════
 # MICROCOLEUS ABUNDANCE RULES
@@ -139,10 +145,15 @@ rule make_dirs:
     # Create the full output directory tree before any other rule runs.
     output:
         ok=os.path.join(OUTDIR, ".dirs.ok")
+    log:
+        os.path.join(LOGDIR, "make_dirs.log")
     shell:
         r"""
-        mkdir -p "{OUTDIR}" "{DBDIR}" "{TMPDIR}" "{PERSAMPLE}" "{MATRIXDIR}"
+        mkdir -p "{OUTDIR}" "{DBDIR}" "{TMPDIR}" "{PERSAMPLE}" "{MATRIXDIR}" "{LOGDIR}"
+        (
+        set -euo pipefail
         touch "{output.ok}"
+        ) > "{log}" 2>&1
         """
 
 rule genome_list:
@@ -153,8 +164,12 @@ rule genome_list:
         dirs=os.path.join(OUTDIR, ".dirs.ok")
     output:
         GENOME_LIST
+    log:
+        os.path.join(LOGDIR, "genome_list.log")
     shell:
         r"""
+        mkdir -p "$(dirname "{log}")"
+        (
         set -euo pipefail
         {SAMTOOLS} --version >/dev/null 2>&1 || true
         grep -E '^>' "{input[0]}" | sed 's/^>//' | awk '{{print $1}}' | sort -u > "{output}"
@@ -163,6 +178,7 @@ rule genome_list:
           echo "ERROR: genome list is empty. Check AA_FASTA path/content: {input[0]}" >&2
           exit 1
         fi
+        ) > "{log}" 2>&1
         """
 
 rule diamond_db:
@@ -174,10 +190,15 @@ rule diamond_db:
         dirs=os.path.join(OUTDIR, ".dirs.ok")
     output:
         DB_DMND
+    log:
+        os.path.join(LOGDIR, "diamond_db.log")
     shell:
         r"""
+        mkdir -p "$(dirname "{log}")"
+        (
         set -euo pipefail
         {DIAMOND} makedb --in "{input[0]}" -d "{DB_PREFIX}"
+        ) > "{log}" 2>&1
         """
 
 rule index_bam:
@@ -188,12 +209,14 @@ rule index_bam:
         dirs=os.path.join(OUTDIR, ".dirs.ok")
     output:
         ok=os.path.join(TMPDIR, "bam_indexed", "{sample}.ok")
+    log:
+        os.path.join(LOGDIR, "index_bam", "{sample}.log")
     threads: 4
     shell:
         r"""
+        mkdir -p "$(dirname "{log}")" "{TMPDIR}/bam_indexed"
+        (
         set -euo pipefail
-        mkdir -p "{TMPDIR}/bam_indexed"
-
         bam="{input.bam}"
         bam_nosuffix="${{bam%.bam}}"
 
@@ -205,6 +228,7 @@ rule index_bam:
           echo "ERROR: BAM index not found after indexing: $bam" >&2
           exit 1
         fi
+        ) > "{log}" 2>&1
         """
 
 rule contig2genome:
@@ -217,6 +241,8 @@ rule contig2genome:
         dirs=os.path.join(OUTDIR, ".dirs.ok")
     output:
         os.path.join(TMPDIR, "contig2genome", "{sample}.contig2genome.tsv")
+    log:
+        os.path.join(LOGDIR, "contig2genome", "{sample}.log")
     threads: 8
     params:
         evalue=lambda wc: config["diamond"]["evalue"],
@@ -224,8 +250,9 @@ rule contig2genome:
         max_t=lambda wc: config["diamond"]["max_target_seqs"]
     shell:
         r"""
+        mkdir -p "$(dirname "{log}")" "{TMPDIR}/contig2genome" "{TMPDIR}/diamond_hits"
+        (
         set -euo pipefail
-        mkdir -p "{TMPDIR}/contig2genome" "{TMPDIR}/diamond_hits"
         m8="{TMPDIR}/diamond_hits/{wildcards.sample}.m8"
 
         {DIAMOND} blastx \
@@ -244,6 +271,7 @@ rule contig2genome:
               if(!(q in best) || b>best[q]) {{ best[q]=b; hit[q]=g; }}
             }}
             END{{ for(q in hit) print q, hit[q]; }}' "$m8" > "{output}"
+        ) > "{log}" 2>&1
         """
 
 rule genome_abundance:
@@ -267,10 +295,13 @@ rule genome_abundance:
         dirs=os.path.join(OUTDIR, ".dirs.ok")
     output:
         os.path.join(PERSAMPLE, "{sample}.genome_abundance.tsv")
+    log:
+        os.path.join(LOGDIR, "genome_abundance", "{sample}.log")
     shell:
         r"""
+        mkdir -p "$(dirname "{log}")" "{TMPDIR}/coverage" "{TMPDIR}/idxstats"
+        (
         set -euo pipefail
-        mkdir -p "{TMPDIR}/coverage" "{TMPDIR}/idxstats"
 
         bam="{input.bam}"
         sample="{wildcards.sample}"
@@ -338,6 +369,7 @@ rule genome_abundance:
 
         mv -f "$tmpout" "$final_out"
         rm -f "$tmptab"
+        ) > "{log}" 2>&1
         """
 
 rule matrices:
@@ -353,8 +385,12 @@ rule matrices:
         rpkm   = os.path.join(MATRIXDIR, "genome_RPKM_matrix.tsv"),
         depth  = os.path.join(MATRIXDIR, "genome_MeanDepth_matrix.tsv"),
         breadth= os.path.join(MATRIXDIR, "genome_Breadth_matrix.tsv")
+    log:
+        os.path.join(LOGDIR, "matrices.log")
     run:
-        import csv
+        import csv, sys as _sys
+        os.makedirs(os.path.dirname(log[0]), exist_ok=True)
+        _lf = open(log[0], "w"); _sys.stdout = _lf
 
         per_files = sorted(glob.glob(os.path.join(PERSAMPLE, "*.genome_abundance.tsv")))
         samples = [os.path.basename(x).replace(".genome_abundance.tsv","") for x in per_files]
@@ -389,6 +425,7 @@ rule matrices:
         write("RPKM",    output.rpkm)
         write("MeanDepth", output.depth)
         write("Breadth", output.breadth)
+        _lf.close(); _sys.stdout = _sys.__stdout__
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -438,8 +475,12 @@ rule fetch_ana_refs:
     # Requires outbound HTTPS to eutils.ncbi.nlm.nih.gov.
     output:
         ANA_REFS
+    log:
+        os.path.join(LOGDIR, "fetch_ana_refs.log")
     run:
-        import urllib.request, urllib.parse, json, time, re
+        import urllib.request, urllib.parse, json, time, re, sys as _sys
+        os.makedirs(os.path.dirname(log[0]), exist_ok=True)
+        _lf = open(log[0], "w"); _sys.stdout = _lf
 
         NCBI = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
         HDR  = {"User-Agent": "microcoleus-anatoxin-pipeline/1.0"}
@@ -634,6 +675,7 @@ rule fetch_ana_refs:
 
         os.rename(tmp, output[0])
         print(f"  Wrote {total} reference proteins → {output[0]}", flush=True)
+        _lf.close(); _sys.stdout = _sys.__stdout__
 
 
 rule make_ana_db:
@@ -642,11 +684,15 @@ rule make_ana_db:
         ANA_REFS
     output:
         ANA_DB_DMND
+    log:
+        os.path.join(LOGDIR, "make_ana_db.log")
     shell:
         r"""
+        mkdir -p "$(dirname "{log}")" "$(dirname "{ANA_DB_DMND}")"
+        (
         set -euo pipefail
-        mkdir -p "$(dirname "{ANA_DB_DMND}")"
         {DIAMOND} makedb --in "{input}" -d "{ANA_DB_PFX}"
+        ) > "{log}" 2>&1
         """
 
 
@@ -666,11 +712,14 @@ rule ana_blastx:
         fasta = lambda wc: assembly_fasta_path(wc.sample)
     output:
         os.path.join(ANA_DIR, "blastx", "{sample}.m8")
+    log:
+        os.path.join(LOGDIR, "ana_blastx", "{sample}.log")
     threads: 8
     shell:
         r"""
+        mkdir -p "$(dirname "{log}")" "{ANA_DIR}/blastx"
+        (
         set -euo pipefail
-        mkdir -p "{ANA_DIR}/blastx"
         {DIAMOND} blastx \
             -d "{ANA_DB_PFX}" \
             -q "{input.fasta}" \
@@ -681,6 +730,7 @@ rule ana_blastx:
             --max-target-seqs 1 \
             --sensitive \
             --threads {threads}
+        ) > "{log}" 2>&1
         """
 
 
@@ -708,8 +758,12 @@ rule ana_per_sample:
         gdepth = os.path.join(MATRIXDIR, "genome_MeanDepth_matrix.tsv")
     output:
         os.path.join(ANA_DIR, "per_sample", "{sample}.ana_abundance.tsv")
+    log:
+        os.path.join(LOGDIR, "ana_per_sample", "{sample}.log")
     run:
-        import csv, collections
+        import csv, collections, sys as _sys
+        os.makedirs(os.path.dirname(log[0]), exist_ok=True)
+        _lf = open(log[0], "w"); _sys.stdout = _lf
 
         sample   = wildcards.sample
         cov_path = os.path.join(TMPDIR, "coverage", f"{sample}.coverage.tsv")
@@ -807,6 +861,7 @@ rule ana_per_sample:
                     f"{gdepth:.4f}",
                     f"{norm_copies:.4f}",
                 ]) + "\n")
+        _lf.close(); _sys.stdout = _sys.__stdout__
 
 
 rule ana_matrix:
@@ -826,8 +881,12 @@ rule ana_matrix:
         copies       = os.path.join(ANA_DIR, "matrices", "ana_normalized_copies_matrix.tsv"),
         completeness = os.path.join(ANA_DIR, "matrices", "ana_completeness_matrix.tsv"),
         genes        = os.path.join(ANA_DIR, "matrices", "ana_genes_present_matrix.tsv")
+    log:
+        os.path.join(LOGDIR, "ana_matrix.log")
     run:
-        import csv
+        import csv, sys as _sys
+        os.makedirs(os.path.dirname(log[0]), exist_ok=True)
+        _lf = open(log[0], "w"); _sys.stdout = _lf
 
         # Collect all rows from per-sample files
         all_rows = []
@@ -864,6 +923,7 @@ rule ana_matrix:
         write_matrix(output.copies,       copies_d)
         write_matrix(output.completeness, comp_d)
         write_matrix(output.genes,        genes_d)
+        _lf.close(); _sys.stdout = _sys.__stdout__
 
 
 rule ana_taxonomy:
@@ -878,8 +938,12 @@ rule ana_taxonomy:
         os.path.join(ANA_DIR, "matrices", "ana_normalized_copies_matrix.tsv")
     output:
         os.path.join(ANA_DIR, "taxonomy", "genome_taxonomy.tsv")
+    log:
+        os.path.join(LOGDIR, "ana_taxonomy.log")
     run:
-        import csv, re, urllib.request, urllib.parse, json, time
+        import csv, re, urllib.request, urllib.parse, json, time, sys as _sys
+        os.makedirs(os.path.dirname(log[0]), exist_ok=True)
+        _lf = open(log[0], "w"); _sys.stdout = _lf
 
         NCBI = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
@@ -940,6 +1004,7 @@ rule ana_taxonomy:
                     fh.write(f"{gid}\t{org}\t{gca}\n")
                 except Exception as e:
                     fh.write(f"{gid}\tError:{e}\t{gca}\n")
+        _lf.close(); _sys.stdout = _sys.__stdout__
 
 
 rule ana_summary:
@@ -958,8 +1023,12 @@ rule ana_summary:
         taxonomy     = os.path.join(ANA_DIR, "taxonomy", "genome_taxonomy.tsv")
     output:
         os.path.join(ANA_DIR, "ana_summary.tsv")
+    log:
+        os.path.join(LOGDIR, "ana_summary.log")
     run:
-        import csv
+        import csv, sys as _sys
+        os.makedirs(os.path.dirname(log[0]), exist_ok=True)
+        _lf = open(log[0], "w"); _sys.stdout = _lf
 
         # Load taxonomy lookup
         tax = {}
@@ -1019,3 +1088,4 @@ rule ana_summary:
                     f"{mean_det:.4f}",
                     ",".join(all_genes),
                 ] + [f"{v:.4f}" for v in vals]) + "\n")
+        _lf.close(); _sys.stdout = _sys.__stdout__
