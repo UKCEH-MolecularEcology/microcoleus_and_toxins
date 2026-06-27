@@ -7,7 +7,7 @@ Dataset3.all.single.copy.trees.nwk
 # Assembly symlink / raw sequencing data
 assembly/
 
-# Pipeline outputs
+# Pipeline outputs (including logs)
 microcoleus_abundance_out/
 
 # PDF preprint
