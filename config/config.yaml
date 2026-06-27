@@ -19,5 +19,7 @@ diamond:
   query_cover: 50
   max_target_seqs: 1
 
-# Name of your existing conda env
-conda_env: "microcoleus"
+# Existing conda env that provides diamond + samtools.
+# Use the full path so conda run works regardless of env name resolution.
+# Verified: respipe has diamond 2.1.8 and samtools 1.6
+conda_env: "/hdd0/susbus/tools/conda_envs/respipe"

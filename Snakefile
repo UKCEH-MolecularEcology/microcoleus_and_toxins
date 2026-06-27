@@ -13,10 +13,11 @@ FASTA_EXTS   = config.get("fasta_exts", ["fasta", "fa", "fna"])
 ENV          = config.get("conda_env", "microcoleus")
 
 # Wrap every tool call so it runs inside the pre-existing conda environment.
-# This avoids --use-conda and lets the env be shared with other workflows.
-DIAMOND  = f"conda run -n {ENV} diamond"
-SAMTOOLS = f"conda run -n {ENV} samtools"
-BASH     = f"conda run -n {ENV} bash -lc"
+# Use -p (path) when conda_env is an absolute path, -n (name) otherwise.
+_ENV_FLAG = "-p" if ENV.startswith("/") else "-n"
+DIAMOND  = f"conda run {_ENV_FLAG} {ENV} diamond"
+SAMTOOLS = f"conda run {_ENV_FLAG} {ENV} samtools"
+BASH     = f"conda run {_ENV_FLAG} {ENV} bash -lc"
 
 def resolve_dir(p):
     try:
