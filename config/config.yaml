@@ -23,3 +23,7 @@ diamond:
 # Use the full path so conda run works regardless of env name resolution.
 # Verified: respipe has diamond 2.1.8 and samtools 1.6
 conda_env: "/hdd0/susbus/tools/conda_envs/respipe"
+
+# SingleM contig-level profiles for community-anatoxin correlation analysis.
+# Each sample must have a matching {sample}_singlem_contigs_profile.tsv file.
+singlem_dir: "/prj/DECODE/EA_AMR/RGI_results/singlem_contigs"

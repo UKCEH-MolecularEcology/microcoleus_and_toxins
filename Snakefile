@@ -49,6 +49,8 @@ GENOME_LIST = os.path.join(TMPDIR, "genome_ids.txt")
 DB_PREFIX   = os.path.join(DBDIR, "Dataset2_AA")
 DB_DMND     = DB_PREFIX + ".dmnd"
 LOGDIR      = os.path.join(OUTDIR, "logs")
+SINGLEM_DIR = config.get("singlem_dir", "")
+CORRDIR     = os.path.join(OUTDIR, "correlations")
 
 def assembly_fasta_path(sample):
     for ext in FASTA_EXTS:
@@ -1181,4 +1183,212 @@ rule ana_summary:
                     f"{mean_det:.4f}",
                     ",".join(all_genes),
                 ] + [f"{v:.4f}" for v in vals]) + "\n")
+        _lf.close(); _sys.stdout = _sys.__stdout__
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# COMMUNITY CORRELATION RULES
+# ════════════════════════════════════════════════════════════════════════════════
+#
+# Uses SingleM contig-level taxonomic profiles (one TSV per sample) to test
+# whether anatoxin abundance correlates with community composition.
+#
+# singlem_matrix      – pivots 450 profile TSVs into a sample × phylum matrix
+#                       (raw coverage and fraction-of-bacteria) plus a
+#                       dedicated Cyanobacteriota summary file.
+#
+# ana_singlem_correlation – joins the anatoxin NormalizedCopies matrix with
+#                           the SingleM phylum matrix and computes Spearman ρ
+#                           for every (genome, phylum) pair, plus an aggregate
+#                           "any anatoxin in sample" series.
+#
+# Run with:  snakemake correlation_all --cores 4
+# ════════════════════════════════════════════════════════════════════════════════
+
+rule correlation_all:
+    input:
+        os.path.join(CORRDIR, "ana_singlem_correlations.tsv"),
+        os.path.join(CORRDIR, "ana_singlem_merged.tsv"),
+        os.path.join(CORRDIR, "singlem_cyanobacteria.tsv")
+
+
+rule singlem_matrix:
+    # Pivot all per-sample SingleM profile TSVs into two sample × phylum matrices:
+    #   singlem_phylum_coverage.tsv  – raw SingleM coverage values
+    #   singlem_phylum_fraction.tsv  – fraction of total bacterial coverage
+    #   singlem_cyanobacteria.tsv    – Cyanobacteriota coverage + fraction only
+    #
+    # Extracts phylum-level rows (taxonomy depth = 3: Root; d__X; p__Y).
+    # Strips the _noOrganellar suffix SingleM appends to sample names.
+    input:
+        profiles = [os.path.join(SINGLEM_DIR, f"{s}_singlem_contigs_profile.tsv")
+                    for s in SAMPLES]
+    output:
+        cov   = os.path.join(CORRDIR, "singlem_phylum_coverage.tsv"),
+        frac  = os.path.join(CORRDIR, "singlem_phylum_fraction.tsv"),
+        cyano = os.path.join(CORRDIR, "singlem_cyanobacteria.tsv")
+    log:
+        os.path.join(LOGDIR, "singlem_matrix.log")
+    run:
+        import sys as _sys
+        os.makedirs(os.path.dirname(log[0]), exist_ok=True)
+        _lf = open(log[0], "w"); _sys.stdout = _lf
+
+        cov_data = {}   # sample → {phylum: coverage}
+        bact_tot = {}   # sample → total bacterial coverage
+
+        for path in input.profiles:
+            fname  = os.path.basename(path)
+            sample = fname.replace("_singlem_contigs_profile.tsv", "") \
+                          .replace("_noOrganellar", "")
+            cov_data[sample] = {}
+            bact_tot[sample] = 0.0
+
+            with open(path) as fh:
+                next(fh)   # skip header
+                for line in fh:
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) < 3:
+                        continue
+                    cov = float(parts[1])
+                    tax = parts[2]
+                    if tax == "Root; d__Bacteria":
+                        bact_tot[sample] = cov
+                    if tax.count(";") == 2:   # phylum-level row exactly
+                        phylum = tax.split("; ")[-1]
+                        cov_data[sample][phylum] = cov
+
+        all_phyla   = sorted({p for d in cov_data.values() for p in d})
+        all_samples = sorted(cov_data.keys())
+        print(f"  Samples: {len(all_samples)}, Phyla: {len(all_phyla)}", flush=True)
+
+        def write_matrix(path, getter):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write("Sample\t" + "\t".join(all_phyla) + "\n")
+                for s in all_samples:
+                    vals = [f"{getter(s, p):.6f}" for p in all_phyla]
+                    fh.write(s + "\t" + "\t".join(vals) + "\n")
+
+        write_matrix(output.cov,  lambda s, p: cov_data[s].get(p, 0.0))
+        write_matrix(output.frac, lambda s, p: (cov_data[s].get(p, 0.0) / bact_tot[s]
+                                                if bact_tot[s] > 0 else 0.0))
+
+        cyano_key = "p__Cyanobacteriota"
+        with open(output.cyano, "w") as fh:
+            fh.write("Sample\tCyanobacteriota_cov\tTotal_bacteria_cov\tCyanobacteriota_frac\n")
+            for s in all_samples:
+                cyano = cov_data[s].get(cyano_key, 0.0)
+                tot   = bact_tot[s]
+                frac  = cyano / tot if tot > 0 else 0.0
+                fh.write(f"{s}\t{cyano:.4f}\t{tot:.4f}\t{frac:.6f}\n")
+
+        _lf.close(); _sys.stdout = _sys.__stdout__
+
+
+rule ana_singlem_correlation:
+    # Join anatoxin NormalizedCopies with SingleM phylum coverage and compute
+    # Spearman rank correlations.
+    #
+    # Two correlation series:
+    #   genome  – per ana-positive genome vs every phylum
+    #   aggregate – max NormalizedCopies across all genomes per sample
+    #               (i.e. "any anatoxin detected") vs every phylum
+    #
+    # Results are sorted by |ρ| descending so the strongest associations
+    # appear first regardless of direction.
+    #
+    # Also writes ana_singlem_merged.tsv – a flat table with anatoxin copies
+    # AND community composition side-by-side, ready for R/Python.
+    input:
+        copies = os.path.join(ANA_DIR, "matrices", "ana_normalized_copies_matrix.tsv"),
+        cov    = os.path.join(CORRDIR, "singlem_phylum_coverage.tsv"),
+        frac   = os.path.join(CORRDIR, "singlem_phylum_fraction.tsv")
+    output:
+        merged = os.path.join(CORRDIR, "ana_singlem_merged.tsv"),
+        corr   = os.path.join(CORRDIR, "ana_singlem_correlations.tsv")
+    log:
+        os.path.join(LOGDIR, "ana_singlem_correlation.log")
+    run:
+        import csv, sys as _sys
+        from scipy.stats import spearmanr
+        os.makedirs(os.path.dirname(log[0]), exist_ok=True)
+        _lf = open(log[0], "w"); _sys.stdout = _lf
+
+        # Anatoxin copies matrix: genome → {sample: NormalizedCopies}
+        copies, samples_ana = {}, []
+        with open(input.copies) as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            samples_ana = [c for c in reader.fieldnames if c != "GenomeID"]
+            for row in reader:
+                copies[row["GenomeID"]] = {s: float(row[s]) for s in samples_ana}
+
+        # SingleM phylum coverage matrix: sample → {phylum: coverage}
+        singlem_cov, singlem_frac, phyla = {}, {}, []
+        with open(input.cov) as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            phyla = [c for c in reader.fieldnames if c != "Sample"]
+            for row in reader:
+                singlem_cov[row["Sample"]] = {p: float(row[p]) for p in phyla}
+        with open(input.frac) as fh:
+            reader = csv.DictReader(fh, delimiter="\t")
+            for row in reader:
+                singlem_frac[row["Sample"]] = {p: float(row[p]) for p in phyla}
+
+        shared = sorted(set(samples_ana) & set(singlem_cov))
+        print(f"  Shared samples: {len(shared)}, ana genomes: {len(copies)}, phyla: {len(phyla)}",
+              flush=True)
+
+        # ── Merged flat table (one row per sample × genome) ───────────────────
+        cyano_col = "p__Cyanobacteriota"
+        os.makedirs(os.path.dirname(output.merged), exist_ok=True)
+        with open(output.merged, "w") as fh:
+            header = (["Sample", "GenomeID", "NormalizedCopies", "Ana_detected",
+                       "Cyano_cov", "Cyano_frac"] +
+                      [f"cov_{p}" for p in phyla])
+            fh.write("\t".join(header) + "\n")
+            for genome in sorted(copies):
+                for s in shared:
+                    nc   = copies[genome].get(s, 0.0)
+                    cyano = singlem_cov[s].get(cyano_col, 0.0)
+                    cyano_fr = singlem_frac[s].get(cyano_col, 0.0)
+                    cov_vals = [f"{singlem_cov[s].get(p, 0.0):.4f}" for p in phyla]
+                    fh.write("\t".join([s, genome, f"{nc:.4f}",
+                                        "1" if nc > 0 else "0",
+                                        f"{cyano:.4f}", f"{cyano_fr:.6f}"]
+                                       + cov_vals) + "\n")
+
+        # ── Spearman correlations ─────────────────────────────────────────────
+        corr_rows = []
+
+        # Per-genome: only for genomes with at least one detection
+        for genome in sorted(copies):
+            nc_vec = [copies[genome].get(s, 0.0) for s in shared]
+            n_det  = sum(1 for x in nc_vec if x > 0)
+            if n_det == 0:
+                continue
+            for p in phyla:
+                cov_vec = [singlem_cov[s].get(p, 0.0) for s in shared]
+                rho, pval = spearmanr(nc_vec, cov_vec)
+                corr_rows.append((genome, p, rho, pval, len(shared), n_det, "genome"))
+
+        # Aggregate: max NormalizedCopies across all ana genomes per sample
+        max_nc   = {s: max((copies[g].get(s, 0.0) for g in copies), default=0.0)
+                    for s in shared}
+        n_det_any = sum(1 for v in max_nc.values() if v > 0)
+        for p in phyla:
+            cov_vec = [singlem_cov[s].get(p, 0.0) for s in shared]
+            nc_vec  = [max_nc[s] for s in shared]
+            rho, pval = spearmanr(nc_vec, cov_vec)
+            corr_rows.append(("ANY_genome", p, rho, pval, len(shared), n_det_any, "aggregate"))
+
+        corr_rows.sort(key=lambda r: abs(r[2]), reverse=True)
+
+        with open(output.corr, "w") as fh:
+            fh.write("GenomeID\tPhylum\tSpearman_rho\tP_value\t"
+                     "N_samples\tN_detected\tLevel\n")
+            for genome, p, rho, pval, n, nd, lvl in corr_rows:
+                fh.write(f"{genome}\t{p}\t{rho:.4f}\t{pval:.4e}\t{n}\t{nd}\t{lvl}\n")
+
+        print(f"  Wrote {len(corr_rows)} correlation rows to {output.corr}", flush=True)
         _lf.close(); _sys.stdout = _sys.__stdout__
