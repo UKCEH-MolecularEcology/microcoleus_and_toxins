@@ -106,7 +106,9 @@ rule ana_all:
     # Runs independently of `rule all`; requires the Microcoleus abundance
     # pipeline to have completed first (it uses contig2genome + coverage outputs).
     input:
-        os.path.join(ANA_DIR, "ana_summary.tsv")
+        os.path.join(ANA_DIR, "ana_summary.tsv"),
+        expand(os.path.join(ANA_DIR, "per_sample_annotated", "{sample}.ana_abundance.tsv"),
+               sample=SAMPLES)
 
 # ════════════════════════════════════════════════════════════════════════════════
 # REFERENCE DATASET DOWNLOAD
@@ -1004,6 +1006,60 @@ rule ana_taxonomy:
                     fh.write(f"{gid}\t{org}\t{gca}\n")
                 except Exception as e:
                     fh.write(f"{gid}\tError:{e}\t{gca}\n")
+        _lf.close(); _sys.stdout = _sys.__stdout__
+
+
+rule ana_annotate_samples:
+    # Join taxonomy names onto each per-sample anatoxin file.
+    # Adds a 'Species' column immediately after 'GenomeID'.
+    # Genome IDs embedding a GCA accession get the NCBI organism name;
+    # custom isolate codes (e.g. Aus8_D4) are labelled 'Microcoleus sp.'
+    # because they predate public deposition.
+    # Output goes to per_sample_annotated/ to keep the raw files intact.
+    input:
+        tax = os.path.join(ANA_DIR, "taxonomy", "genome_taxonomy.tsv"),
+        tsvs = expand(os.path.join(ANA_DIR, "per_sample", "{sample}.ana_abundance.tsv"),
+                      sample=SAMPLES)
+    output:
+        expand(os.path.join(ANA_DIR, "per_sample_annotated", "{sample}.ana_abundance.tsv"),
+               sample=SAMPLES)
+    log:
+        os.path.join(LOGDIR, "ana_annotate_samples.log")
+    run:
+        import csv, sys as _sys
+        os.makedirs(os.path.dirname(log[0]), exist_ok=True)
+        _lf = open(log[0], "w"); _sys.stdout = _lf
+
+        # Build genome → species mapping from the taxonomy TSV.
+        # GCA-bearing IDs get the NCBI organism name; others get a fallback.
+        tax = {}
+        with open(input.tax) as fh:
+            for row in csv.DictReader(fh, delimiter="\t"):
+                sp = row.get("Species", "").strip()
+                tax[row["GenomeID"]] = sp if sp else "Microcoleus sp."
+
+        out_dir = os.path.join(ANA_DIR, "per_sample_annotated")
+        os.makedirs(out_dir, exist_ok=True)
+
+        for tsv_path in input.tsvs:
+            sample = os.path.basename(tsv_path).replace(".ana_abundance.tsv", "")
+            out_path = os.path.join(out_dir, f"{sample}.ana_abundance.tsv")
+            with open(tsv_path) as fin, open(out_path, "w") as fout:
+                reader = csv.DictReader(fin, delimiter="\t")
+                # Insert Species right after GenomeID
+                orig_fields = list(reader.fieldnames)
+                idx = orig_fields.index("GenomeID") + 1
+                new_fields = orig_fields[:idx] + ["Species"] + orig_fields[idx:]
+                writer = csv.DictWriter(fout, fieldnames=new_fields,
+                                        delimiter="\t", extrasaction="ignore")
+                writer.writeheader()
+                for row in reader:
+                    gid = row["GenomeID"]
+                    row["Species"] = tax.get(gid, "Microcoleus sp.")
+                    writer.writerow(row)
+            print(f"  Annotated {sample}", flush=True)
+
+        print(f"  Done — wrote {len(input.tsvs)} annotated per-sample files", flush=True)
         _lf.close(); _sys.stdout = _sys.__stdout__
 
 
