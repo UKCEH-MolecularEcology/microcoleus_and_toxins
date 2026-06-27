@@ -107,6 +107,7 @@ rule ana_all:
     # pipeline to have completed first (it uses contig2genome + coverage outputs).
     input:
         os.path.join(ANA_DIR, "ana_summary.tsv"),
+        os.path.join(ANA_DIR, "ana_combined.tsv"),
         expand(os.path.join(ANA_DIR, "per_sample_annotated", "{sample}.ana_abundance.tsv"),
                sample=SAMPLES)
 
@@ -1060,6 +1061,42 @@ rule ana_annotate_samples:
             print(f"  Annotated {sample}", flush=True)
 
         print(f"  Done — wrote {len(input.tsvs)} annotated per-sample files", flush=True)
+        _lf.close(); _sys.stdout = _sys.__stdout__
+
+
+rule ana_combined:
+    # Concatenate all annotated per-sample anatoxin files into one flat table.
+    # The header is written once; each sample's rows follow in sample name order.
+    # This is the easiest file to load into R/Python for downstream analysis.
+    input:
+        expand(os.path.join(ANA_DIR, "per_sample_annotated", "{sample}.ana_abundance.tsv"),
+               sample=SAMPLES)
+    output:
+        os.path.join(ANA_DIR, "ana_combined.tsv")
+    log:
+        os.path.join(LOGDIR, "ana_combined.log")
+    run:
+        import sys as _sys
+        os.makedirs(os.path.dirname(log[0]), exist_ok=True)
+        _lf = open(log[0], "w"); _sys.stdout = _lf
+
+        header_written = False
+        total_rows = 0
+        with open(output[0], "w") as fout:
+            for path in sorted(input):
+                with open(path) as fin:
+                    lines = fin.readlines()
+                if not lines:
+                    continue
+                if not header_written:
+                    fout.write(lines[0])   # header
+                    header_written = True
+                for line in lines[1:]:     # data rows
+                    fout.write(line)
+                    total_rows += 1
+
+        print(f"  Combined {len(input)} sample files → {total_rows} rows", flush=True)
+        print(f"  Output: {output[0]}", flush=True)
         _lf.close(); _sys.stdout = _sys.__stdout__
 
 
