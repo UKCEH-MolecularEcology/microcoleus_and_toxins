@@ -1,0 +1,23 @@
+# Path to your AA marker FASTA (Dataset2)
+aa_fasta: "Dataset2.AA.microcoleus.and.GenBank.fa"
+
+# Assembly directory (can be a symlink like "assembly")
+assembly_dir: "/prj/DECODE/EA_DATA/assembly"
+
+# Where outputs go
+outdir: "microcoleus_abundance_out"
+
+# Which assembly FASTA extensions to scan
+fasta_exts: ["fasta", "fa", "fna"]
+
+# Parallelisation
+total_cores: 64
+
+# Tool parameters
+diamond:
+  evalue: "1e-10"
+  query_cover: 50
+  max_target_seqs: 1
+
+# Name of your existing conda env
+conda_env: "microcoleus"

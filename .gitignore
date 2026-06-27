@@ -1,0 +1,22 @@
+# Large reference data (too big for git — obtain locally)
+Dataset1.AA.alignment.fa
+Dataset2.AA.microcoleus.and.GenBank.fa
+Dataset3.AA.microcoleus.without.genbank.fa
+Dataset3.all.single.copy.trees.nwk
+
+# Assembly symlink / raw sequencing data
+assembly/
+
+# Pipeline outputs
+microcoleus_abundance_out/
+
+# PDF preprint
+*.pdf
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+
+# Snakemake internals
+.snakemake/
